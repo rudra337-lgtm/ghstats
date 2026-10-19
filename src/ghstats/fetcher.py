@@ -235,15 +235,31 @@ class StatsFetcher:
         }
 
     def fetch_user_repos(self, limit: int = 30) -> list[dict]:
-        """Fetch user's public repos."""
+        """Fetch the user's public repos, best-starred first.
+
+        ``limit`` is a *display* cap: it must be applied only after the star
+        sort. If the walk stopped as soon as ``limit`` repos were pooled, the
+        sort at the bottom would only re-order the first ``limit`` repos in
+        GitHub's default API order, and "Top Repos" would show 0-star rows
+        while the account's most-starred repos were truncated away before the
+        sort ever saw them (#84). So the walker takes whole pages — every page
+        asks for ``_MAX_PER_PAGE`` items, and the page targets stay constant
+        across the walk (#81) — until the API reports no more data or
+        ``max_pages`` is spent, then sorts the pool, then caps to ``limit``.
+        Any account that fits inside the pool budget is ranked exactly; much
+        larger accounts may be mis-ranked, which the ``max_pages`` budget
+        trades for bounded API traffic.
+        """
         repos: list[dict] = []
         page = 1
-        per_page = min(_MAX_PER_PAGE, limit)
+        # Whole pages only: sizing the page to ``limit`` would hand the sort a
+        # pool that is already capped at ``limit`` in API order (#84).
+        per_page = _MAX_PER_PAGE
         # A user can own many more repos than `limit` while only a few are
         # non-forks, so bound the number of pages instead of trusting the
         # exit condition to stop an unbounded walk.
         max_pages = max(1, -(-limit // _MAX_PER_PAGE) + _MAX_REPO_PAGES)
-        while len(repos) < limit and page <= max_pages:
+        while page <= max_pages:
             # `gh api` rejects --per-page/--paginate; paging params belong in
             # the endpoint query string.
             data = self._run_gh([

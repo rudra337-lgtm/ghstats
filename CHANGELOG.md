@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `ghstats repos -n N` now reports the N most-starred repos. `StatsFetcher.fetch_user_repos`
+  used to stop collecting as soon as `limit` repos were pooled — pooling at
+  `per_page=min(100, limit)` and walking until the pool reached `limit` — so the
+  star sort ran over an already-truncated pool in GitHub's default API order.
+  "Top Repos" then displayed the API-order head (often all zero stars) while the
+  account's most-starred repos were truncated away before the sort ever saw
+  them, with exit code 0. The walk now always asks for whole pages
+  (`per_page=100`, staying constant across subsequent pages, which also keeps
+  the #81 offset arithmetic monotonic), pools everything the walk consumes,
+  sorts by stars, and only then caps to `limit`. Regression tests pin both the
+  single-page and the full-first-page ranks (`tests/test_repo_top_stars.py`).
 - Error chaining in `StatsFetcher._run_gh`: the three `GHRuntimeError` raises
   inside `except` blocks now chain their cause (`raise ... from e`). Without the
   chain, Python prints "During handling of the above exception, another

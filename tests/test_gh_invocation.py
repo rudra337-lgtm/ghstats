@@ -231,29 +231,43 @@ class TestRepoArgv:
         cmd = run.calls[0]
         assert cmd[0] == "gh" and cmd[1] == "api"
         assert cmd[2].startswith("users/yunaremaia/repos?")
-        assert "per_page=5" in cmd[2] and "page=1" in cmd[2]
+        # Whole pages only (issue #84): sizing the page to `limit` would hand
+        # the star sort a pool already capped at `limit` in API order.
+        assert "per_page=100" in cmd[2] and "page=1" in cmd[2]
         assert not any(arg.startswith("--per-page") for arg in cmd), cmd
         assert not any(arg.startswith("--paginate") for arg in cmd), cmd
         assert repos[0]["full_name"] == "yunaremaia/ghstats"
 
     def test_repo_listing_pagination_stable_per_page(self, fetcher, monkeypatch):
-        """Paging must maintain a constant per_page so offsets advance monotonically (issue #81)."""
+        """Paging must maintain a constant whole-page per_page so offsets advance
+        monotonically (issue #81), while the pool still spans the pages the walk
+        consumes (issue #84): only the final sort-then-cap narrows to `limit`.
+
+        Page 1 is a full 100-item page (one fork among the repos); the high-star
+        repos live on page 2. The star sort must rank them, and both pages must
+        ask for the same whole-page size — no shrinking to `limit - len(repos)`.
+        """
         calls = []
 
         def fake_run(cmd, **kwargs):
             calls.append(list(cmd))
             endpoint = cmd[2]
-            if "page=1" in endpoint:
-                # Page 1 returns 2 repos (1 fork, 1 non-fork)
+            page = int(endpoint.rsplit("page=", 1)[1])
+            if page == 1:
+                # Page 1 returns a full _MAX_PER_PAGE page (1 fork, 99 repos)
                 page_data = [
-                    {"name": "fork1", "full_name": "yunaremaia/fork1", "fork": True, "stargazers_count": 0},
-                    {"name": "repo1", "full_name": "yunaremaia/repo1", "fork": False, "stargazers_count": 5},
+                    {"name": "fork1", "full_name": "yunaremaia/fork1", "fork": True, "stargazers_count": 0}
+                ] + [
+                    {"name": f"filler{i:03d}", "full_name": f"yunaremaia/filler{i:03d}",
+                     "fork": False, "stargazers_count": 0}
+                    for i in range(99)
                 ]
             else:
-                # Page 2 returns 2 repos (both non-forks)
+                # Page 2 returns 3 repos (all non-forks), among them the stars
                 page_data = [
                     {"name": "repo2", "full_name": "yunaremaia/repo2", "fork": False, "stargazers_count": 10},
                     {"name": "repo3", "full_name": "yunaremaia/repo3", "fork": False, "stargazers_count": 2},
+                    {"name": "repo1", "full_name": "yunaremaia/repo1", "fork": False, "stargazers_count": 5},
                 ]
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(page_data), stderr="")
 
@@ -261,8 +275,11 @@ class TestRepoArgv:
         repos = fetcher.fetch_user_repos(limit=2)
 
         assert len(calls) == 2
-        # Both pages must request per_page=2 without shrinking to per_page=1 on page 2
-        assert "per_page=2&page=1" in calls[0][2]
-        assert "per_page=2&page=2" in calls[1][2]
+        # Both pages must request the same whole-page per_page=100 without shrinking
+        assert "per_page=100&page=1" in calls[0][2]
+        assert "per_page=100&page=2" in calls[1][2]
         assert len(repos) == 2
+        # Sorted by stars across the whole pool: repo2 (10) then repo1 (5),
+        # even though repo2 and repo3 were truncated away by the old
+        # stop-at-limit walk ordering.
         assert [r["name"] for r in repos] == ["repo2", "repo1"]
